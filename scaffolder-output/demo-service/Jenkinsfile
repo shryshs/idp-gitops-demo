@@ -1,0 +1,63 @@
+pipeline {
+  agent any
+
+  environment {
+    AWS_REGION = "ap-south-1"
+    ECR_REPO = "711387125079.dkr.ecr.ap-south-1.amazonaws.com/idp-demo-service"
+    IMAGE_TAG = "v${BUILD_NUMBER}"
+    GITOPS_REPO = "https://github.com/shryshs/idp-gitops-demo.git"
+    GITOPS_BRANCH = "main"
+  }
+
+  stages {
+    stage('Checkout App') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Build Image') {
+      steps {
+        sh 'docker build -t $ECR_REPO:$IMAGE_TAG .'
+      }
+    }
+
+    stage('Trivy Scan (optional)') {
+      steps {
+        sh '''
+          if command -v trivy >/dev/null 2>&1; then
+            trivy image --exit-code 0 --severity HIGH,CRITICAL $ECR_REPO:$IMAGE_TAG
+          else
+            echo "Trivy not installed, skipping scan"
+          fi
+        '''
+      }
+    }
+
+    stage('Push to ECR') {
+      steps {
+        sh '''
+          aws ecr get-login-password --region $AWS_REGION \
+          | docker login --username AWS --password-stdin <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com
+          docker push $ECR_REPO:$IMAGE_TAG
+        '''
+      }
+    }
+
+    stage('Update GitOps values.yaml') {
+      steps {
+        sh '''
+          rm -rf gitops-tmp
+          git clone -b $GITOPS_BRANCH $GITOPS_REPO gitops-tmp
+          cd gitops-tmp
+          sed -i "s/tag: \\".*\\"/tag: \\"$IMAGE_TAG\\"/" apps/demo-service/values.yaml
+          git config user.email "jenkins@local"
+          git config user.name "jenkins"
+          git add apps/demo-service/values.yaml
+          git commit -m "Update demo-service image tag to $IMAGE_TAG" || echo "No changes to commit"
+          git push origin $GITOPS_BRANCH
+        '''
+      }
+    }
+  }
+}
